@@ -1,47 +1,80 @@
 <script lang="ts">
-    import type { Skill } from "$lib/types";
-    import { settings } from "$lib/utils/settings";
-    import { cubicOut } from "svelte/easing";
-    import { tweened } from "svelte/motion";
-    import PlayerBreakdownRow from "./shared/PlayerBreakdownRow.svelte";
+  import type { EntityState } from "$lib/entity.svelte.js";
+  import { SkillState } from "$lib/skill.svelte.js";
+  import { settings } from "$lib/stores.svelte.js";
+  import type { Skill } from "$lib/types";
+  import { getSkillIcon, rgbLinearShadeAdjust } from "$lib/utils";
+  import { cubicOut } from "svelte/easing";
+  import { Tween } from "svelte/motion";
+  import { getSortedBreakdownColumns } from "./PlayerBreakdownColumns.svelte";
+  import QuickTooltip from "./QuickTooltip.svelte";
+  import { skillTooltip } from "./Snippets.svelte";
+  import type { LogColumn } from "$lib/column";
 
-    export let skill: Skill;
-    export let color: string;
-    export let hasFrontAttacks: boolean;
-    export let hasBackAttacks: boolean;
-    export let anySupportBuff: boolean;
-    export let anySupportIdentity: boolean;
-    export let anySupportBrand: boolean;
-    export let abbreviatedSkillDamage: (string | number)[];
-    export let skillDps: (string | number)[];
-    export let playerDamageDealt: number;
-    export let damagePercentage: number;
-    export let duration: number;
-    export let index: number;
+  interface Props {
+    skill: Skill;
+    entityState: EntityState;
+    width: number;
+    shadow?: boolean;
+    index: number;
+  }
 
-    const tweenedValue = tweened(0, {
-        duration: 400,
-        easing: cubicOut
-    });
+  let { skill, entityState, width, shadow = false, index }: Props = $props();
 
-    $: {
-        tweenedValue.set(damagePercentage);
-    }
+  let skillState = $derived(new SkillState(skill, entityState));
+  let columns = $derived(getSortedBreakdownColumns(entityState.isSupport));
+  let tweenedValue = new Tween(entityState.encounter.live ? 0 : width, {
+    duration: 400,
+    easing: cubicOut
+  });
+  $effect(() => {
+    tweenedValue.set(width ?? 0);
+  });
+
+  function isActiveSort(columnDef: LogColumn<EntityState, SkillState>): boolean {
+    if (entityState.skillSort === "stagger") return columnDef.headerText === "STAG";
+    if (entityState.skillSort === "buffed" && entityState.isSupport) return columnDef.headerText === "bDMG";
+    return columnDef.headerText === "DMG";
+  }
 </script>
 
-<PlayerBreakdownRow
-    {skill}
-    {color}
-    {hasFrontAttacks}
-    {hasBackAttacks}
-    {anySupportBuff}
-    {anySupportIdentity}
-    {anySupportBrand}
-    {abbreviatedSkillDamage}
-    {skillDps}
-    {playerDamageDealt}
-    {duration}
-    width={$tweenedValue}
-    meterSettings={$settings.meter}
-    {index}
-    />
+<td class="pl-1">
+  <QuickTooltip tooltip={skill.name}>
+    <img class="size-5" src={getSkillIcon(skill.icon)} alt={skill.name} />
+  </QuickTooltip>
+</td>
+
+<td class="-left-px" colspan="2">
+  <div class="flex truncate">
+    <QuickTooltip tooltip={skillTooltip} tooltipProps={skill} class="truncate">
+      {skill.name}
+    </QuickTooltip>
+  </div>
+</td>
+
+{#each columns as columnDef (columnDef.headerText)}
+  {#if columnDef.show(entityState)}
+    <td
+      class="cursor-default px-1 text-center"
+      style={isActiveSort(columnDef) ? `background-color: rgb(from ${entityState.color} r g b / 0.05)` : ""}
+    >
+      {#snippet tooltip()}
+        {#if columnDef.valueTooltip}
+          {@render columnDef.valueTooltip(skillState)}
+        {/if}
+      {/snippet}
+
+      <QuickTooltip tooltip={columnDef.valueTooltip ? tooltip : null}>
+        {@render columnDef.value(skillState)}
+      </QuickTooltip>
+    </td>
+  {/if}
+{/each}
+
+<td
+  class="absolute left-0 -z-10 h-7 px-2 py-1"
+  class:shadow-md={shadow}
+  style="background-color: {index % 2 === 1 && settings.app.general.splitLines
+    ? rgbLinearShadeAdjust(entityState.color, -0.2, 0.6)
+    : `rgb(from ${entityState.color} r g b / 0.6)`}; width: {tweenedValue.current}%"
+></td>

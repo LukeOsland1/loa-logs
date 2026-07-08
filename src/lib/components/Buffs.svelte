@@ -1,144 +1,106 @@
 <script lang="ts">
-    import {
-        MeterTab,
-        type EncounterDamageStats,
-        type Entity,
-        type StatusEffect,
-        EntityType,
-        BuffDetails,
-        type PartyInfo
-    } from "$lib/types";
-    import { filterStatusEffects, getPartyBuffs } from "$lib/utils/buffs";
-    import { flip } from "svelte/animate";
-    import BuffRow from "./BuffRow.svelte";
-    import BuffSkillBreakdown from "./BuffSkillBreakdown.svelte";
-    import { settings } from "$lib/utils/settings";
-    import BuffHeader from "./shared/BuffHeader.svelte";
-    import PartyBuffRow from "./PartyBuffRow.svelte";
+  import { BuffState } from "$lib/buffs.svelte.js";
+  import type { EncounterState } from "$lib/encounter.svelte.js";
+  import { settings } from "$lib/stores.svelte.js";
+  import { EntityType, MeterTab, type Entity } from "$lib/types";
+  import { flip } from "svelte/animate";
+  import Back from "./Back.svelte";
+  import BuffHeader from "./BuffHeader.svelte";
+  import BuffRow from "./BuffRow.svelte";
+  import BuffSkillBreakdown from "./BuffSkillBreakdown.svelte";
+  import PartyBuffRow from "./PartyBuffRow.svelte";
 
-    export let tab: MeterTab;
-    export let encounterDamageStats: EncounterDamageStats | undefined;
-    export let players: Array<Entity>;
-    export let focusedPlayer: Entity | null = null;
-    export let handleRightClick: () => void;
-    export let inspectPlayer: (name: string) => void;
-    export let encounterPartyInfo: PartyInfo | undefined;
-    export let localPlayer: string | undefined;
+  interface Props {
+    tab: MeterTab;
+    enc: EncounterState;
+    focusedPlayer?: Entity;
+    inspectPlayer: (name: string) => void;
+    handleRightClick: () => void;
+  }
 
-    let groupedSynergies: Map<string, Map<number, StatusEffect>> = new Map();
-    let percentages = Array<number>();
+  let { tab, enc, focusedPlayer = $bindable(), inspectPlayer, handleRightClick }: Props = $props();
 
-    let parties = new Array<Array<Entity>>();
-    let partyGroupedSynergies = new Array<[string, Set<string>]>();
-    let partyPercentages = new Array<number[]>();
+  let buffs = $derived(new BuffState(enc, tab));
 
-    let partyBuffs = new Map<string, Map<string, Array<BuffDetails>>>();
-
-    let localPlayerInP1 = true;
-
-    $: {
-        if (focusedPlayer && focusedPlayer.entityType === EntityType.ESTHER) {
-            focusedPlayer = null;
-            handleRightClick();
-        }
-        players = players.filter((player) => player.entityType === EntityType.PLAYER);
-        groupedSynergies = new Map<string, Map<number, StatusEffect>>();
-        if (encounterDamageStats) {
-            percentages = players.map(
-                (player) => (player.damageStats.damageDealt / encounterDamageStats!.topDamageDealt) * 100
-            );
-            Object.entries(encounterDamageStats.buffs).forEach(([id, buff]) => {
-                if (focusedPlayer && !Object.hasOwn(focusedPlayer.damageStats.buffedBy, id)) {
-                    return;
-                }
-                filterStatusEffects(groupedSynergies, buff, Number(id), focusedPlayer, tab, $settings.buffs.default);
-            });
-            Object.entries(encounterDamageStats.debuffs).forEach(([id, debuff]) => {
-                if (focusedPlayer && !Object.hasOwn(focusedPlayer.damageStats.debuffedBy, id)) {
-                    return;
-                }
-                filterStatusEffects(groupedSynergies, debuff, Number(id), focusedPlayer, tab, $settings.buffs.default);
-            });
-            groupedSynergies = new Map([...groupedSynergies.entries()].sort());
-            if ($settings.meter.splitPartyBuffs && encounterPartyInfo && Object.keys(encounterPartyInfo).length > 1 && !focusedPlayer) {
-                const partyBuffsObj = getPartyBuffs(
-                    players,
-                    encounterDamageStats.topDamageDealt,
-                    encounterPartyInfo,
-                    groupedSynergies
-                );
-
-                if (localPlayer && $settings.meter.pinSelfParty) {
-                    localPlayerInP1 = encounterPartyInfo[0].some((player) => player === localPlayer);
-                }
-
-                parties = partyBuffsObj.parties;
-                partyGroupedSynergies = [...partyBuffsObj.partyGroupedSynergies];
-                partyPercentages = partyBuffsObj.partyPercentages;
-                partyBuffs = partyBuffsObj.partyBuffs;
-            }
-        }
+  $effect(() => {
+    if (focusedPlayer && focusedPlayer.entityType === EntityType.ESTHER) {
+      focusedPlayer = undefined;
+    } else {
+      buffs.setFocusedPlayer(focusedPlayer);
     }
+  });
 </script>
 
-{#if $settings.meter.splitPartyBuffs && parties.length > 1 && partyGroupedSynergies.length > 1 && parties.length === partyGroupedSynergies.length && tab === MeterTab.PARTY_BUFFS && !focusedPlayer}
-    <div class="flex flex-col" class:flex-col-reverse={!localPlayerInP1} id="live-meter-table">
-        {#each partyGroupedSynergies as [partyId, synergies], i (partyId)}
-            {#if parties[i] && parties[i].length > 0}
-            <table class="w-full table-fixed">
-                <thead class="z-40 h-6" id="buff-head">
-                    <tr class="bg-zinc-900">
-                        <th class="w-7 whitespace-nowrap px-2 font-normal tracking-tight">Party {+partyId + 1}</th>
-                        <th class="w-20 px-2 text-left font-normal" />
-                        <th class="w-full" />
-                        {#each [...synergies] as synergy (synergy)}
-                            {@const syns = groupedSynergies.get(synergy) || new Map()}
-                            <BuffHeader synergies={syns} />
-                        {/each}
-                    </tr>
-                </thead>
-                <tbody class="relative z-10">
-                    {#each parties[i] as player, playerIndex (player.name)}
-                        {@const playerBuffs = partyBuffs.get(partyId)?.get(player.name) ?? []}
-                        <tr
-                            class="h-7 px-2 py-1 {$settings.general.underlineHovered ? 'hover:underline' : ''}"
-                            animate:flip={{ duration: 200 }}
-                            on:click={() => inspectPlayer(player.name)}>
-                            <PartyBuffRow {player} {playerBuffs} percentage={partyPercentages[i][playerIndex]} />
-                        </tr>
-                    {/each}
-                </tbody>
-            </table>
-            {/if}
-        {/each}
-    </div>
-{:else}
-    <table class="relative w-full table-fixed" id="live-meter-table">
-        <thead class="sticky top-0 z-40 h-6">
-            <tr class="bg-zinc-900">
-                <th class="w-7 px-2 font-normal" />
-                <th class="w-14 px-2 text-left font-normal" />
-                <th class="w-full" />
-                {#each [...groupedSynergies] as [id, synergies] (id)}
-                    <BuffHeader {synergies} />
-                {:else}
-                    <th class="font-normal w-20">No Buffs</th>
-                {/each}
+{#if enc.curSettings.splitPartyBuffs && enc.parties.length > 1 && buffs.partyGroupedSynergies.size > 1 && enc.parties.length === buffs.partyGroupedSynergies.size && tab === MeterTab.PARTY_BUFFS && !focusedPlayer}
+  <div class="flex flex-col {enc.live ? '' : 'gap-2'}">
+    {#each buffs.partyGroupedSynergies as [partyId, synergies], i (partyId)}
+      {#if enc.parties[i] && enc.parties[i].length > 0}
+        <table
+          class="isolate w-full table-fixed {enc.live &&
+          settings.app.meter.pinSelfParty &&
+          buffs.enc.parties[i].some((player) => player.name === enc.localPlayer)
+            ? 'order-first'
+            : ''}"
+        >
+          <thead class="z-40 h-6 {enc.live ? 'sticky top-0 backdrop-blur-lg' : ''}">
+            <tr class="bg-neutral-900">
+              <th class="w-7 whitespace-nowrap px-2 font-normal tracking-tight">Party {+partyId + 1}</th>
+              <th class="w-20 px-2 text-left font-normal"></th>
+              <th class="w-full"></th>
+              {#each [...synergies] as synergy (synergy)}
+                {@const syns = buffs.groupedSynergies.get(synergy) || new Map()}
+                <BuffHeader buffs={syns} />
+              {/each}
             </tr>
-        </thead>
-        <tbody on:contextmenu|preventDefault={handleRightClick}>
-            {#if !focusedPlayer}
-                {#each players as player, i (player.name)}
-                    <tr
-                        class="h-7 px-2 py-1 {$settings.general.underlineHovered ? 'hover:underline' : ''}"
-                        animate:flip={{ duration: 200 }}
-                        on:click={() => inspectPlayer(player.name)}>
-                        <BuffRow {player} {groupedSynergies} percentage={percentages[i]} />
-                    </tr>
-                {/each}
-            {:else}
-                <BuffSkillBreakdown {groupedSynergies} player={focusedPlayer} {tab} />
-            {/if}
-        </tbody>
-    </table>
+          </thead>
+          <tbody class="relative z-10">
+            {#each enc.parties[i] as player, playerIndex (player.name)}
+              {@const playerBuffs = buffs.partyBuffs.get(partyId)?.get(player.name) ?? []}
+              <tr
+                animate:flip={{ duration: 200 }}
+                class="h-7 px-2 py-1 {settings.app.general.underlineHovered ? 'hover:underline' : ''}"
+                onclick={() => inspectPlayer(player.name)}
+              >
+                <PartyBuffRow {player} {enc} {playerBuffs} percentage={enc.partyDamagePercentages[i][playerIndex]!} />
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
+    {/each}
+  </div>
+{:else}
+  <table class="isolate w-full table-fixed">
+    <thead class="relative z-40 h-6 {enc.live ? 'sticky top-0 backdrop-blur-lg' : ''}">
+      <tr class="bg-neutral-900">
+        <th class="w-7 px-2 font-normal">
+          {#if focusedPlayer}
+            <Back {handleRightClick} />
+          {/if}
+        </th>
+        <th class="w-20 px-2 text-left font-normal"></th>
+        <th class="w-full"></th>
+        {#each buffs.groupedSynergies as [id, synergies] (id)}
+          <BuffHeader buffs={synergies} />
+        {:else}
+          <th class="font-normal w-20">No Buffs</th>
+        {/each}
+      </tr>
+    </thead>
+    <tbody oncontextmenu={handleRightClick} class="relative z-10">
+      {#if !focusedPlayer}
+        {#each buffs.players as player, i (player.name)}
+          <tr
+            animate:flip={{ duration: 200 }}
+            class="h-7 px-2 py-1 {settings.app.general.underlineHovered ? 'hover:underline' : ''}"
+            onclick={() => inspectPlayer(player.name)}
+          >
+            <BuffRow {enc} {player} groupedSynergies={buffs.groupedSynergies} percentage={buffs.percentages[i]!} />
+          </tr>
+        {/each}
+      {:else}
+        <BuffSkillBreakdown {enc} groupedSynergies={buffs.groupedSynergies} player={focusedPlayer} {tab} />
+      {/if}
+    </tbody>
+  </table>
 {/if}

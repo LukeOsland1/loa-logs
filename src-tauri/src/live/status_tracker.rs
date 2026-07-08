@@ -1,0 +1,555 @@
+use crate::data::*;
+use crate::live::entity_tracker::Entity;
+use crate::live::entity_tracker::SkillRuntimeData;
+use crate::live::party_tracker::PartyTracker;
+use crate::live::player_stats::PlayerStats;
+use crate::live::status_tracker::StatusEffectBuffCategory::{BattleItem, Bracelet, Elixir, Etc};
+use crate::live::status_tracker::StatusEffectCategory::Debuff;
+use crate::live::status_tracker::StatusEffectShowType::All;
+use crate::live::utils::{get_new_id, get_status_effect_buff_type_flags};
+use crate::models::{EncounterEntity, EntityType};
+use chrono::{DateTime, Utc};
+use hashbrown::HashMap;
+use meter_defs::defs::StatusEffectData;
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::sync::Arc;
+
+pub const WORKSHOP_BUFF_ID: u32 = 9701;
+
+pub type StatusEffectRegistry = HashMap<u32, StatusEffectDetails>;
+
+pub struct StatusTracker {
+    party_tracker: Rc<RefCell<PartyTracker>>,
+    local_status_effect_registry: HashMap<u64, StatusEffectRegistry>,
+    party_status_effect_registry: HashMap<u64, StatusEffectRegistry>,
+}
+
+impl StatusTracker {
+    pub fn new(party_tracker: Rc<RefCell<PartyTracker>>) -> Self {
+        Self {
+            party_tracker,
+            local_status_effect_registry: HashMap::new(),
+            party_status_effect_registry: HashMap::new(),
+        }
+    }
+
+    pub fn register_status_effect(&mut self, se: StatusEffectDetails) {
+        let registry = match se.target_type {
+            StatusEffectTargetType::Local => &mut self.local_status_effect_registry,
+            StatusEffectTargetType::Party => &mut self.party_status_effect_registry,
+        };
+
+        registry.entry(se.target_id).or_insert_with(HashMap::new);
+
+        let ser = registry.get_mut(&se.target_id).unwrap();
+        ser.insert(se.instance_id, se);
+    }
+
+    pub fn remove_local_object(&mut self, object_id: u64) {
+        self.local_status_effect_registry.remove(&object_id);
+    }
+
+    pub fn remove_party_object(&mut self, object_id: u64) {
+        self.party_status_effect_registry.remove(&object_id);
+    }
+
+    pub fn remove_status_effects(
+        &mut self,
+        target_id: u64,
+        instance_id: Vec<u32>,
+        reason: u8,
+        sett: StatusEffectTargetType,
+    ) -> (
+        bool,
+        Vec<StatusEffectDetails>,
+        Vec<StatusEffectDetails>,
+        bool,
+    ) {
+        let registry = match sett {
+            StatusEffectTargetType::Local => &mut self.local_status_effect_registry,
+            StatusEffectTargetType::Party => &mut self.party_status_effect_registry,
+        };
+
+        let mut has_shield_buff = false;
+        let mut shields_broken: Vec<StatusEffectDetails> = Vec::new();
+        let mut left_workshop = false;
+        let mut effects_removed = Vec::new();
+
+        if let Some(ser) = registry.get_mut(&target_id) {
+            for id in instance_id {
+                if let Some(se) = ser.remove(&id) {
+                    if se.status_effect_id == WORKSHOP_BUFF_ID {
+                        left_workshop = true;
+                    }
+                    if se.status_effect_type == StatusEffectType::Shield {
+                        has_shield_buff = true;
+                        if reason == 4 {
+                            shields_broken.push(se);
+                            continue;
+                        }
+                    }
+                    effects_removed.push(se);
+                }
+            }
+        }
+
+        (
+            has_shield_buff,
+            shields_broken,
+            effects_removed,
+            left_workshop,
+        )
+    }
+
+    pub fn update_status_duration(
+        &mut self,
+        instance_id: u32,
+        target_id: u64,
+        timestamp: u64,
+        sett: StatusEffectTargetType,
+    ) {
+        let registry = match sett {
+            StatusEffectTargetType::Local => &mut self.local_status_effect_registry,
+            StatusEffectTargetType::Party => &mut self.party_status_effect_registry,
+        };
+
+        let _ = match registry.get_mut(&target_id) {
+            Some(ser) => ser,
+            None => return,
+        };
+    }
+
+    pub fn sync_status_effect(
+        &mut self,
+        instance_id: u32,
+        character_id: u64,
+        object_id: u64,
+        value: u64,
+        local_character_id: u64,
+    ) -> (Option<StatusEffectDetails>, u64) {
+        let use_party = self.should_use_party_status_effect(character_id, local_character_id);
+        let (target_id, sett) = if use_party {
+            (character_id, StatusEffectTargetType::Party)
+        } else {
+            (object_id, StatusEffectTargetType::Local)
+        };
+        if target_id == 0 {
+            return (None, 0);
+        }
+        let registry = match sett {
+            StatusEffectTargetType::Local => &mut self.local_status_effect_registry,
+            StatusEffectTargetType::Party => &mut self.party_status_effect_registry,
+        };
+
+        let ser = match registry.get_mut(&target_id) {
+            Some(ser) => ser,
+            None => return (None, 0),
+        };
+
+        let se = match ser.get_mut(&instance_id) {
+            Some(se) => se,
+            None => return (None, 0),
+        };
+
+        let old_value = se.value;
+        se.value = value;
+
+        (Some(se.clone()), old_value)
+    }
+
+    pub fn get_status_effects(
+        &mut self,
+        source_entity: &Entity,
+        target_entity: &Entity,
+        local_character_id: u64,
+    ) -> (Vec<StatusEffectDetails>, Vec<StatusEffectDetails>) {
+        let timestamp = Utc::now();
+
+        let use_party_for_source = if source_entity.entity_type == EntityType::Player {
+            self.should_use_party_status_effect(source_entity.character_id, local_character_id)
+        } else {
+            false
+        };
+        // println!("use_party_for_source: {:?}", use_party_for_source);
+        let (source_id, source_type) = if use_party_for_source {
+            (source_entity.character_id, StatusEffectTargetType::Party)
+        } else {
+            (source_entity.id, StatusEffectTargetType::Local)
+        };
+        // println!("source_id: {:?}, source_type: {:?}", source_id, source_type);
+
+        let status_effects_on_source =
+            self.actually_get_status_effects(source_id, source_type, timestamp);
+
+        // Party filtering for cross-party effects on the target is done downstream
+        // via rdps::filter_target_effects_for_attacker (and analyze_hit_rdps's own
+        // should_apply_target_effect), so we just pull every effect from the right
+        // registry here.
+        let use_party_for_target = source_entity.entity_type == EntityType::Player
+            && self.should_use_party_status_effect(target_entity.character_id, local_character_id);
+        let (target_id, target_type) = if use_party_for_target {
+            (target_entity.character_id, StatusEffectTargetType::Party)
+        } else {
+            (target_entity.id, StatusEffectTargetType::Local)
+        };
+        let mut status_effects_on_target =
+            self.actually_get_status_effects(target_id, target_type, timestamp);
+        // println!("status_effects_on_target: {:?}", status_effects_on_target);
+        // println!(
+        //     "status_effects_on_source: {:?}, status_effects_on_target: {:?}",
+        //     status_effects_on_source, status_effects_on_target);
+        status_effects_on_target.retain(|se| {
+            !(se.target_type == StatusEffectTargetType::Local
+                && se.category == Debuff
+                && se.source_id != source_id
+                && se.db_target_type == "self")
+        });
+        (status_effects_on_source, status_effects_on_target)
+    }
+
+    pub fn get_source_status_effects(
+        &mut self,
+        source_entity: &Entity,
+        timestamp: DateTime<Utc>,
+    ) -> Vec<StatusEffectDetails> {
+        if source_entity.entity_type != EntityType::Player {
+            return self.actually_get_status_effects(
+                source_entity.id,
+                StatusEffectTargetType::Local,
+                timestamp,
+            );
+        }
+
+        let mut merged = HashMap::new();
+        for effect in self.actually_get_status_effects(
+            source_entity.id,
+            StatusEffectTargetType::Local,
+            timestamp,
+        ) {
+            merged.insert(
+                (
+                    effect.instance_id,
+                    effect.status_effect_id,
+                    effect.source_id,
+                ),
+                effect,
+            );
+        }
+        for effect in self.actually_get_status_effects(
+            source_entity.character_id,
+            StatusEffectTargetType::Party,
+            timestamp,
+        ) {
+            let key = (
+                effect.instance_id,
+                effect.status_effect_id,
+                effect.source_id,
+            );
+            match merged.entry(key) {
+                hashbrown::hash_map::Entry::Occupied(mut entry) => {
+                    if effect.timestamp > entry.get().timestamp {
+                        entry.insert(effect);
+                    }
+                }
+                hashbrown::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(effect);
+                }
+            }
+        }
+
+        let mut effects = merged.into_values().collect::<Vec<_>>();
+        effects.sort_by_key(|effect| {
+            (
+                effect.timestamp,
+                effect.instance_id,
+                effect.status_effect_id,
+                effect.source_id,
+            )
+        });
+        effects
+    }
+
+    pub fn actually_get_status_effects(
+        &mut self,
+        target_id: u64,
+        sett: StatusEffectTargetType,
+        timestamp: DateTime<Utc>,
+    ) -> Vec<StatusEffectDetails> {
+        let registry = match sett {
+            StatusEffectTargetType::Local => &mut self.local_status_effect_registry,
+            StatusEffectTargetType::Party => &mut self.party_status_effect_registry,
+        };
+
+        // println!("registry: {:?}", registry);
+        let ser = match registry.get_mut(&target_id) {
+            Some(ser) => ser,
+            None => return Vec::new(),
+        };
+
+        ser.retain(|_, se| se.expire_at.is_none_or(|expire_at| expire_at > timestamp));
+        ser.values().cloned().collect()
+    }
+
+    fn should_use_party_status_effect(&self, character_id: u64, local_character_id: u64) -> bool {
+        let party_tracker = self.party_tracker.borrow();
+        let local_player_party_id = party_tracker
+            .character_id_to_party_id
+            .get(&local_character_id);
+        let affected_player_party_id = party_tracker.character_id_to_party_id.get(&character_id);
+        // println!("party character_id_to_party_id: {:?}", party_tracker.character_id_to_party_id);
+        // println!("character_id: {}, local_character_id: {}", character_id, local_character_id);
+        // println!(
+        //     "local_player_party_id: {:?}, affected_player_party_id: {:?}",
+        //     local_player_party_id, affected_player_party_id);
+
+        match (
+            local_player_party_id,
+            affected_player_party_id,
+            character_id == local_character_id,
+        ) {
+            (Some(local_party), Some(affected_party), false) => local_party == affected_party,
+            _ => false,
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.local_status_effect_registry.clear();
+        self.party_status_effect_registry.clear();
+    }
+
+    pub fn has_status_effect(
+        &self,
+        character_id: u64,
+        object_id: u64,
+        local_character_id: u64,
+        status_effect_id: u32,
+    ) -> bool {
+        let use_party = self.should_use_party_status_effect(character_id, local_character_id);
+        let registry = if use_party {
+            &self.party_status_effect_registry
+        } else {
+            &self.local_status_effect_registry
+        };
+        let target_id = if use_party { character_id } else { object_id };
+        if target_id == 0 {
+            return false;
+        }
+
+        registry.get(&target_id).is_some_and(|effects| {
+            effects
+                .values()
+                .any(|effect| effect.status_effect_id == status_effect_id)
+        })
+    }
+}
+
+pub fn build_status_effect(
+    se_data: &StatusEffectData,
+    target_id: u64,
+    source_id: u64,
+    target_type: StatusEffectTargetType,
+    timestamp: DateTime<Utc>,
+    source_entity: Option<&EncounterEntity>,
+) -> StatusEffectDetails {
+    let value = get_status_effect_value(&se_data.value.bytearray_0);
+    let mut status_effect_category = StatusEffectCategory::Other;
+    let mut buff_category = StatusEffectBuffCategory::Other;
+    let mut show_type = StatusEffectShowType::Other;
+    let mut status_effect_type = StatusEffectType::Other;
+    let mut name = "Unknown".to_string();
+    let mut db_target_type = "".to_string();
+    let mut custom_id = 0;
+    let mut unique_group = 0;
+    let mut source_skill_id = None;
+    let mut buff_type_flags = 0;
+    if let Some(effect) = SKILL_BUFF_DATA.get(&se_data.status_effect_id) {
+        name = effect.name.clone().unwrap_or_default();
+        unique_group = remap_effective_unique_group(se_data.status_effect_id, effect.unique_group);
+        buff_type_flags = get_status_effect_buff_type_flags(effect);
+        if effect.category.as_str() == "debuff" {
+            status_effect_category = Debuff
+        }
+        match effect.buff_category.clone().unwrap_or_default().as_str() {
+            "bracelet" => buff_category = Bracelet,
+            "etc" => buff_category = Etc,
+            "battleitem" => buff_category = BattleItem,
+            "elixir" => buff_category = Elixir,
+            _ => {}
+        }
+        if effect.icon_show_type.clone().unwrap_or_default() == "all" {
+            show_type = All
+        }
+        status_effect_type = match effect.buff_type.as_str() {
+            "shield" => StatusEffectType::Shield,
+            "freeze" | "fear" | "stun" | "sleep" | "earthquake" | "electrocution"
+            | "polymorph_pc" | "forced_move" | "mind_control" | "paralyzation"
+            | "psychokinesis" => StatusEffectType::HardCrowdControl,
+            _ => StatusEffectType::Other,
+        };
+        db_target_type = effect.target.to_string();
+
+        if let Some(source_skills) = effect.source_skills.as_ref() {
+            if source_skills.len() == 1 {
+                source_skill_id = source_skills.first().copied();
+            }
+            // if skill has multiple source skills, we need to find the one that was last used
+            // e.g. bard brands have same buff id, but have different source skills (sound shock, harp)
+            // if skills only have one source skill, we dont care about it here and it gets handled later
+            if source_skills.len() > 1
+                && let Some(source_entity) = source_entity
+            {
+                let mut last_time = i64::MIN;
+                let mut last_skill = 0_u32;
+                for source_skill in source_skills {
+                    if let Some(skill) = source_entity.skills.get(source_skill) {
+                        if skill.name.is_empty() {
+                            continue;
+                        }
+                        // hard code check for stigma brand tripod
+                        // maybe set up a map of tripods for other skills in future idk??
+                        if skill.id == 21090 {
+                            if let Some(tripods) = skill.tripod_index {
+                                if tripods.second != 2 {
+                                    continue;
+                                }
+                            } else {
+                                continue;
+                            }
+                        }
+                        if skill.last_timestamp > last_time {
+                            last_skill = *source_skill;
+                            last_time = skill.last_timestamp;
+                        }
+                    }
+                }
+
+                // if such a skill exists, we assign a new custom buff id to distinguish it.
+                // we encode the buff id as well too because there are multiple buffs that have
+                // the same source skill, that also have multiple source skills.
+                // without it, it leads to customids that are different but end up sharing the same id
+                if last_skill > 0 {
+                    source_skill_id = Some(last_skill);
+                    custom_id = get_new_id(last_skill + (effect.id as u32));
+                }
+            }
+        } else {
+            source_skill_id = Some((unique_group / 10).max((effect.id as u32) / 10));
+        }
+    }
+
+    StatusEffectDetails {
+        instance_id: se_data.status_effect_instance_id,
+        source_id,
+        source_skill_id,
+        target_id,
+        status_effect_id: se_data.status_effect_id,
+        custom_id,
+        target_type,
+        db_target_type,
+        skill_level: se_data.skill_level,
+        buff_type_flags,
+        value,
+        stack_count: se_data.stack_count,
+        buff_category,
+        category: status_effect_category,
+        status_effect_type,
+        show_type,
+        expiration_delay: se_data.total_time,
+        expire_at: None,
+        end_tick: se_data.end_tick,
+        name,
+        timestamp,
+        unique_group,
+        owner_player_stats_snapshot: None,
+        source_skill_runtime_snapshot: None,
+    }
+}
+
+pub fn get_status_effect_value(value: &Option<Vec<u8>>) -> u64 {
+    value.as_ref().map_or(0, |v| {
+        let c1 = v
+            .get(0..8)
+            .map_or(0, |bytes| u64::from_le_bytes(bytes.try_into().unwrap()));
+        let c2 = v
+            .get(8..16)
+            .map_or(0, |bytes| u64::from_le_bytes(bytes.try_into().unwrap()));
+        c1.min(c2)
+    })
+}
+
+fn remap_effective_unique_group(status_effect_id: u32, unique_group: u32) -> u32 {
+    match status_effect_id {
+        // LAL keeps the Paladin self aura pieces independent from the party aura group.
+        2360068 | 2360124 => 0,
+        2360125 => 360102,
+        _ => unique_group,
+    }
+}
+
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
+pub enum StatusEffectTargetType {
+    #[default]
+    Party = 0,
+    Local = 1,
+}
+
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
+pub enum StatusEffectCategory {
+    #[default]
+    Other = 0,
+    Debuff = 1,
+}
+
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
+pub enum StatusEffectBuffCategory {
+    #[default]
+    Other = 0,
+    Bracelet = 1,
+    Etc = 2,
+    BattleItem = 3,
+    Elixir = 4,
+}
+
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
+pub enum StatusEffectShowType {
+    #[default]
+    Other = 0,
+    All = 1,
+}
+
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
+pub enum StatusEffectType {
+    #[default]
+    Shield = 0,
+    Other = 1,
+    HardCrowdControl = 2, // stun, root, MC, etc
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct StatusEffectDetails {
+    pub instance_id: u32,
+    pub status_effect_id: u32,
+    pub custom_id: u32,
+    pub target_id: u64,
+    pub source_id: u64,
+    pub source_skill_id: Option<u32>,
+    pub target_type: StatusEffectTargetType,
+    pub db_target_type: String,
+    pub skill_level: u8,
+    pub buff_type_flags: u32,
+    pub value: u64,
+    pub stack_count: u8,
+    pub category: StatusEffectCategory,
+    pub buff_category: StatusEffectBuffCategory,
+    pub show_type: StatusEffectShowType,
+    pub status_effect_type: StatusEffectType,
+    pub expiration_delay: f32,
+    pub expire_at: Option<DateTime<Utc>>,
+    pub end_tick: u64,
+    pub timestamp: DateTime<Utc>,
+    pub name: String,
+    pub unique_group: u32,
+    pub owner_player_stats_snapshot: Option<Arc<PlayerStats>>,
+    pub source_skill_runtime_snapshot: Option<SkillRuntimeData>,
+}

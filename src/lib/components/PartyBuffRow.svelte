@@ -1,69 +1,60 @@
 <script lang="ts">
-    import { HexToRgba } from "$lib/utils/colors";
-    import { formatPlayerName } from "$lib/utils/strings";
-    import { colors, classIconCache, settings } from "$lib/utils/settings";
-    import { tooltip } from "$lib/utils/tooltip";
-    import type { BuffDetails, Entity } from "$lib/types";
-    import BuffTooltipDetail from "./shared/BuffTooltipDetail.svelte";
-    import { tweened } from "svelte/motion";
-    import { cubicOut } from "svelte/easing";
-    import { localPlayer } from "$lib/utils/stores";
+  import type { EncounterState } from "$lib/encounter.svelte.js";
+  import { EntityState } from "$lib/entity.svelte.js";
+  import type { BuffDetails, Entity } from "$lib/types";
+  import { cubicOut } from "svelte/easing";
+  import { Tween } from "svelte/motion";
+  import QuickTooltip from "./QuickTooltip.svelte";
+  import BuffDetailTooltip from "./tooltips/BuffDetailTooltip.svelte";
+  import ClassTooltip from "./tooltips/ClassTooltip.svelte";
+  import { settings } from "$lib/stores.svelte.js";
 
-    export let player: Entity;
-    export let playerBuffs: Array<BuffDetails>;
-    export let percentage: number;
+  interface Props {
+    player: Entity;
+    enc: EncounterState;
+    playerBuffs: Array<BuffDetails>;
+    percentage: number;
+  }
 
-    let color = "#ffffff";
-    let alpha = 0.6;
-    let playerName: string;
+  let { player, enc, playerBuffs, percentage }: Props = $props();
+  let entityState = new EntityState(player, enc);
+  $effect(() => {
+    entityState.entity = player;
+    entityState.encounter = enc;
+  });
 
-    const tweenedValue = tweened(0, {
-        duration: 400,
-        easing: cubicOut
-    });
+  const tweenedValue = new Tween(enc.live ? 0 : percentage, {
+    duration: 400,
+    easing: cubicOut
+  });
 
-    
-    $: {
-        tweenedValue.set(percentage);
-        if (Object.hasOwn($colors, player.class)) {
-            if ($settings.general.constantLocalPlayerColor && $localPlayer == player.name) {
-                color = $colors["Local"].color;
-            } else {
-                color = $colors[player.class].color;
-            }
-        }
-        playerName = formatPlayerName(player, $settings.general);;
-        if (!$settings.meter.showClassColors) {
-            alpha = 0;
-        } else {
-            alpha = 0.6;
-        }
-    }
+  let alpha = $derived(enc.live && !settings.app.meter.showClassColors ? 0 : 0.6);
+
+  $effect(() => {
+    tweenedValue.set(percentage ?? 0);
+  });
 </script>
 
 <td class="pl-1">
-    <img
-        class="table-cell size-5"
-        src={$classIconCache[player.classId]}
-        alt={player.class}
-        use:tooltip={{ content: player.class }} />
+  <ClassTooltip entity={player} />
 </td>
 <td colspan="2">
-    <div class="truncate">
-        <span use:tooltip={{ content: playerName }}>
-            {playerName}
-        </span>
-    </div>
+  <div class="flex truncate">
+    <QuickTooltip tooltip={entityState.name} class="truncate">
+      {entityState.name}
+    </QuickTooltip>
+  </div>
 </td>
 {#if playerBuffs.length > 0}
-    {#each playerBuffs as buff (buff.id)}
-        <td class="px-1 text-center text-3xs">
-            {#if buff.percentage}
-                <BuffTooltipDetail synergy={buff} />
-            {/if}
-        </td>
-    {/each}
+  {#each playerBuffs as buff (buff.id)}
+    <td class="px-1 text-center text-sm text-neutral-200">
+      {#if buff.percentage}
+        <BuffDetailTooltip buffDetails={buff} />
+      {/if}
+    </td>
+  {/each}
 {/if}
-<div
-    class="absolute left-0 -z-10 h-7 px-2 py-1"
-    style="background-color: {HexToRgba(color, alpha)}; width: {$tweenedValue}%" />
+<td
+  class="absolute left-0 -z-10 h-7 px-2 py-1"
+  style="background-color: rgb(from {entityState.color} r g b / {alpha}); width: {tweenedValue.current}%"
+></td>

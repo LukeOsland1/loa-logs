@@ -1,89 +1,364 @@
 <script lang="ts">
-    import { EntityType, type Entity, type Skill } from "$lib/types";
-    import { abbreviateNumberSplit } from "$lib/utils/numbers";
-    import { flip } from "svelte/animate";
-    import PlayerBreakdownRow from "./PlayerBreakdownRow.svelte";
-    import { colors, settings } from "$lib/utils/settings";
-    import PlayerBreakdownHeader from "./shared/PlayerBreakdownHeader.svelte";
-    import { cardIds } from "$lib/constants/cards";
-    import { localPlayer } from "$lib/utils/stores";
+  import QuickTooltip from "$lib/components/QuickTooltip.svelte";
+  import type { EncounterState } from "$lib/encounter.svelte.js";
+  import { EntityState } from "$lib/entity.svelte.js";
+  import { IconExternalLink, IconFileClock } from "$lib/icons";
+  import { settings } from "$lib/stores.svelte.js";
+  import { EntityType, type Entity } from "$lib/types";
+  import {
+    abbreviateNumberSplit,
+    customRound,
+    isNameValid,
+    isSupportSpec,
+    LOA_BIBLE_URL,
+    rgbLinearShadeAdjust
+  } from "$lib/utils";
+  import { openUrl } from "@tauri-apps/plugin-opener";
+  import { flip } from "svelte/animate";
+  import { unbuffedDamageTooltip, unbuffedDpsTooltip } from "./DamageMeterColumns.svelte";
+  import PlayerBreakdownHeader from "./PlayerBreakdownHeader.svelte";
+  import PlayerBreakdownRow from "./PlayerBreakdownRow.svelte";
+  import { badTooltip, fadTooltip } from "./Snippets.svelte";
+  import ArkPassiveTooltip from "./tooltips/ArkPassiveTooltip.svelte";
+  import ClassTooltip from "./tooltips/ClassTooltip.svelte";
 
-    export let entity: Entity | null;
-    export let duration: number;
-    export let handleRightClick: () => void;
+  interface Props {
+    handleRightClick: () => void;
+    entity: Entity;
+    enc: EncounterState;
+  }
 
-    let color = "#ffffff";
-    let skills: Array<Skill> = [];
-    let skillDamagePercentages: Array<number> = [];
-    let abbreviatedSkillDamage: Array<(string | number)[]> = [];
-    let skillDps: Array<(string | number)[]> = [];
-
-    let hasBackAttacks = true;
-    let hasFrontAttacks = true;
-    let anySupportBrand = false;
-    let anySupportIdentity = false;
-    let anySupportBuff = false;
-
-    $: {
-        if (entity) {
-            if (Object.hasOwn($colors, entity.class)) {
-                if ($settings.general.constantLocalPlayerColor && $localPlayer == entity.name) {
-                    color = $colors["Local"].color;
-                } else {
-                    color = $colors[entity.class].color;
-                }
-            } else if (entity.entityType === EntityType.ESTHER) {
-                color = "#4dc8d0";
-            }
-            skills = Object.values(entity.skills).sort((a, b) => b.totalDamage - a.totalDamage);
-            if (entity.class === "Arcanist") {
-                skills = skills.filter((skill) => !cardIds.includes(skill.id));
-            }
-            if (skills.length > 0) {
-                let mostDamageSkill = skills[0].totalDamage;
-                skillDamagePercentages = skills.map((skill) => (skill.totalDamage / mostDamageSkill) * 100);
-                abbreviatedSkillDamage = skills.map((skill) => abbreviateNumberSplit(skill.totalDamage));
-                skillDps = skills.map((skill) => abbreviateNumberSplit(skill.totalDamage / (duration / 1000)));
-                hasBackAttacks = skills.some((skill) => skill.backAttacks > 0);
-                hasFrontAttacks = skills.some((skill) => skill.frontAttacks > 0);
-                anySupportBuff = skills.some((skill) => skill.buffedBySupport > 0);
-                anySupportIdentity = skills.some((skill) => skill.buffedByIdentity > 0);
-                anySupportBrand = skills.some((skill) => skill.debuffedBySupport > 0);
-            }
-        }
-    }
+  let { entity, enc, handleRightClick }: Props = $props();
+  let entityState = new EntityState(entity, enc);
+  $effect(() => {
+    entityState.entity = entity;
+    entityState.encounter = enc;
+  });
 </script>
 
-<thead class="sticky top-0 z-40 h-6">
-    <tr class="bg-zinc-900 tracking-tighter">
-        <PlayerBreakdownHeader
-            meterSettings={$settings.meter}
-            {hasFrontAttacks}
-            {hasBackAttacks}
-            {anySupportBuff}
-            {anySupportIdentity}
-            {anySupportBrand} />
-    </tr>
+<thead class="z-30 h-6 {enc.live ? 'sticky top-0 backdrop-blur-lg' : ''}">
+  <tr class="bg-neutral-950/80">
+    <PlayerBreakdownHeader {entityState} {handleRightClick} />
+  </tr>
 </thead>
-<tbody on:contextmenu|preventDefault={handleRightClick} class="relative z-10">
-    {#if entity}
-        {#each skills as skill, i (skill.id)}
-            <tr class="h-7 px-2 py-1 text-3xs {$settings.general.underlineHovered ? 'hover:underline' : ''}" animate:flip={{ duration: 200 }}>
-                <PlayerBreakdownRow
-                    {skill}
-                    {color}
-                    {hasFrontAttacks}
-                    {hasBackAttacks}
-                    {anySupportBuff}
-                    {anySupportIdentity}
-                    {anySupportBrand}
-                    abbreviatedSkillDamage={abbreviatedSkillDamage[i]}
-                    playerDamageDealt={entity.damageStats.damageDealt}
-                    damagePercentage={skillDamagePercentages[i]}
-                    skillDps={skillDps[i]}
-                    {duration} 
-                    index={i}/>
-            </tr>
-        {/each}
-    {/if}
+
+<tbody class="relative z-10">
+  {#if entity.entityType !== EntityType.ESTHER}
+    <tr class="h-7 px-2 py-1 text-xxs {settings.app.general.underlineHovered ? 'hover:underline' : ''}">
+      <td class="pl-1">
+        <ClassTooltip {entity} />
+      </td>
+      <td colspan="2">
+        <div class="flex gap-1">
+          <div class="truncate">
+            <ArkPassiveTooltip state={entityState} />
+          </div>
+          {#if isNameValid(entityState.entity.name) && entityState.entity.entityType === EntityType.PLAYER}
+            <button
+              class="shrink-0"
+              title="View Character Profile"
+              onclick={(e) => {
+                e.stopPropagation();
+                openUrl(LOA_BIBLE_URL + "/character/" + enc.region + "/" + entityState.entity.name);
+              }}
+            >
+              <IconExternalLink class="size-3" />
+            </button>
+          {/if}
+          {#if entityState.entity.loadoutHash}
+            <button
+              class="shrink-0 tracking-tighter hover:underline"
+              title="View Loadout Snapshot"
+              onclick={(e) => {
+                e.stopPropagation();
+                openUrl(LOA_BIBLE_URL + `/character/snapshot/${entityState.entity.loadoutHash}`);
+              }}
+            >
+              <IconFileClock class="size-3" />
+            </button>
+          {/if}
+        </div>
+      </td>
+      {#if entityState.isSupport}
+        {#if entityState.hasUdpsContributions}
+          <td class="px-1 text-center">
+            <QuickTooltip tooltip={entityState.totalDamageBuffed.toLocaleString()}>
+              {entityState.totalDamageBuffedString[0]}<span class="text-xxs text-gray-300"
+                >{entityState.totalDamageBuffedString[1]}</span
+              >
+            </QuickTooltip>
+          </td>
+        {/if}
+        {#if entityState.hasUdpsContributions}
+          <td class="px-1 text-center">
+            <QuickTooltip tooltip={entityState.totalDpsBuffed.toLocaleString()}>
+              {entityState.totalDpsBuffedString[0]}<span class="text-xxs text-gray-300"
+                >{entityState.totalDpsBuffedString[1]}</span
+              >
+            </QuickTooltip>
+          </td>
+        {/if}
+        {#if enc.curSettings.breakdown.unbuffedDamage && entityState.hasUdpsContributions}
+          {@const supportDamagePercent = ((entityState.totalDamageBuffed / enc.totalDamageDealt) * 100).toFixed(1)}
+          <td class="px-1 text-center">
+            <QuickTooltip tooltip="Contributed {supportDamagePercent}% of total raid damage">
+              {supportDamagePercent}<span class="text-xs text-gray-300">%</span>
+            </QuickTooltip>
+          </td>
+        {/if}
+        {#if enc.curSettings.breakdown.damage}
+          <td class="px-1 text-center">
+            <QuickTooltip tooltip={entity.damageStats.damageDealt.toLocaleString()}>
+              {entityState.damageDealtString[0]}<span class="text-xxs text-gray-300"
+                >{entityState.damageDealtString[1]}</span
+              >
+            </QuickTooltip>
+          </td>
+        {/if}
+        {#if enc.curSettings.breakdown.dps}
+          <td class="px-1 text-center">
+            <QuickTooltip tooltip={entity.damageStats.dps.toLocaleString()}>
+              {entityState.dpsString[0]}<span class="text-xxs text-gray-300">{entityState.dpsString[1]}</span>
+            </QuickTooltip>
+          </td>
+        {/if}
+        {#if enc.curSettings.breakdown.damagePercent}
+          <td class="px-1 text-center">
+            {entityState.damagePercentage}<span class="text-xs text-gray-300">%</span>
+          </td>
+        {/if}
+        {#if enc.curSettings.breakdown.unbuffedDamage && entityState.anyUnbuffedDamage}
+          {@const unbuffedDamage = abbreviateNumberSplit(entity.damageStats.unbuffedDamage)}
+          <td class="px-1 text-center">
+            <QuickTooltip tooltip={unbuffedDamageTooltip} tooltipProps={entityState}>
+              {unbuffedDamage[0]}<span class="text-xxs text-gray-300">{unbuffedDamage[1]}</span>
+            </QuickTooltip>
+          </td>
+        {/if}
+        {#if enc.curSettings.breakdown.unbuffedDps && entityState.anyUnbuffedDamage}
+          {@const unbuffedDps = abbreviateNumberSplit(entity.damageStats.unbuffedDps)}
+          <td class="px-1 text-center">
+            <QuickTooltip tooltip={unbuffedDpsTooltip} tooltipProps={entityState}>
+              {unbuffedDps[0]}<span class="text-xxs text-gray-300">{unbuffedDps[1]}</span>
+            </QuickTooltip>
+          </td>
+        {/if}
+        {#if !isSupportSpec(entity.spec) && enc.curSettings.breakdown.ndps && enc.anyRdpsContributions}
+          {#if entity.damageStats.rdpsDamageReceived > 0}
+            {@const ndmg = abbreviateNumberSplit(entityState.baseDamage)}
+            <td class="px-1 text-center">
+              <QuickTooltip tooltip={entityState.baseDamage.toLocaleString()}>
+                {ndmg[0]}<span class="text-xxs text-gray-300">{ndmg[1]}</span>
+              </QuickTooltip>
+            </td>
+          {:else}
+            <td class="px-1 text-center">-</td>
+          {/if}
+        {/if}
+        {#if !isSupportSpec(entity.spec) && enc.curSettings.breakdown.ndps && enc.anyRdpsContributions}
+          {#if entity.damageStats.rdpsDamageReceived > 0}
+            <td class="px-1 text-center">
+              <QuickTooltip tooltip={entityState.ndps.toLocaleString()}>
+                {entityState.ndpsString[0]}<span class="text-xxs text-gray-300">{entityState.ndpsString[1]}</span>
+              </QuickTooltip>
+            </td>
+          {:else}
+            <td class="px-1 text-center">-</td>
+          {/if}
+        {/if}
+      {:else}
+        {#if enc.curSettings.breakdown.damage}
+          <td class="px-1 text-center">
+            <QuickTooltip tooltip={entity.damageStats.damageDealt.toLocaleString()}>
+              {entityState.damageDealtString[0]}<span class="text-xxs text-gray-300"
+                >{entityState.damageDealtString[1]}</span
+              >
+            </QuickTooltip>
+          </td>
+        {/if}
+        {#if enc.curSettings.breakdown.unbuffedDamage && entityState.anyUnbuffedDamage}
+          {@const unbuffedDamage = abbreviateNumberSplit(entity.damageStats.unbuffedDamage)}
+          <td class="px-1 text-center">
+            <QuickTooltip tooltip={unbuffedDamageTooltip} tooltipProps={entityState}>
+              {unbuffedDamage[0]}<span class="text-xxs text-gray-300">{unbuffedDamage[1]}</span>
+            </QuickTooltip>
+          </td>
+        {/if}
+        {#if enc.curSettings.breakdown.ndps && enc.anyRdpsContributions}
+          {#if entity.damageStats.rdpsDamageReceived > 0}
+            {@const ndmg = abbreviateNumberSplit(entityState.baseDamage)}
+            <td class="px-1 text-center">
+              <QuickTooltip tooltip={entityState.baseDamage.toLocaleString()}>
+                {ndmg[0]}<span class="text-xxs text-gray-300">{ndmg[1]}</span>
+              </QuickTooltip>
+            </td>
+          {:else}
+            <td class="px-1 text-center">-</td>
+          {/if}
+        {/if}
+        {#if enc.curSettings.breakdown.dps}
+          <td class="px-1 text-center">
+            <QuickTooltip tooltip={entity.damageStats.dps.toLocaleString()}>
+              {entityState.dpsString[0]}<span class="text-xxs text-gray-300">{entityState.dpsString[1]}</span>
+            </QuickTooltip>
+          </td>
+        {/if}
+        {#if enc.curSettings.breakdown.unbuffedDps && entityState.anyUnbuffedDamage}
+          {@const unbuffedDps = abbreviateNumberSplit(entity.damageStats.unbuffedDps)}
+          <td class="px-1 text-center">
+            <QuickTooltip tooltip={unbuffedDpsTooltip} tooltipProps={entityState}>
+              {unbuffedDps[0]}<span class="text-xxs text-gray-300">{unbuffedDps[1]}</span>
+            </QuickTooltip>
+          </td>
+        {/if}
+        {#if enc.curSettings.breakdown.ndps && enc.anyRdpsContributions}
+          {#if entity.damageStats.rdpsDamageReceived > 0}
+            <td class="px-1 text-center">
+              <QuickTooltip tooltip={entityState.ndps.toLocaleString()}>
+                {entityState.ndpsString[0]}<span class="text-xxs text-gray-300">{entityState.ndpsString[1]}</span>
+              </QuickTooltip>
+            </td>
+          {:else}
+            <td class="px-1 text-center">-</td>
+          {/if}
+        {/if}
+        {#if enc.curSettings.breakdown.damagePercent}
+          <td class="px-1 text-center">
+            {entityState.damagePercentage}<span class="text-xs text-gray-300">%</span>
+          </td>
+        {/if}
+      {/if}
+      {#if enc.curSettings.breakdown.critRate}
+        <td class="px-1 text-center">
+          {entityState.critPercentage}<span class="text-xxs text-gray-300">%</span>
+        </td>
+      {/if}
+      {#if !enc.live && settings.app.logs.breakdown.adjustedCritRate}
+        <td class="px-1 text-center"> - </td>
+      {/if}
+      {#if enc.curSettings.breakdown.critDmg}
+        <td class="px-1 text-center">
+          {entityState.critDmgPercentage}<span class="text-xxs text-gray-300">%</span>
+        </td>
+      {/if}
+      {#if entityState.anyFrontAttacks && enc.curSettings.breakdown.frontAtk && !enc.curSettings.positionalDmgPercent}
+        <td class="px-1 text-center">
+          {entityState.faPercentage}<span class="text-xxs text-gray-300">%</span>
+        </td>
+      {/if}
+      {#if entityState.anyFrontAttacks && enc.curSettings.breakdown.frontAtk && enc.curSettings.positionalDmgPercent}
+        <td class="px-1 text-center">
+          <QuickTooltip tooltip={fadTooltip} tooltipProps={entityState}>
+            {entityState.fadPercentage}<span class="text-xxs text-gray-300">%</span>
+          </QuickTooltip>
+        </td>
+      {/if}
+      {#if entityState.anyBackAttacks && enc.curSettings.breakdown.backAtk && !enc.curSettings.positionalDmgPercent}
+        <td class="px-1 text-center">
+          {entityState.baPercentage}<span class="text-xxs text-gray-300">%</span>
+        </td>
+      {/if}
+      {#if entityState.anyBackAttacks && enc.curSettings.breakdown.backAtk && enc.curSettings.positionalDmgPercent}
+        <td class="px-1 text-center">
+          <QuickTooltip tooltip={badTooltip} tooltipProps={entityState}>
+            {entityState.badPercentage}<span class="text-xxs text-gray-300">%</span>
+          </QuickTooltip>
+        </td>
+      {/if}
+      {#if entityState.anySupportBuff && enc.curSettings.breakdown.percentBuffBySup}
+        <td class="px-1 text-center">
+          {customRound((entity.damageStats.buffedBySupport / entityState.damageDealtWithoutSpecialOrHa) * 100)}<span
+            class="text-xxs text-gray-300">%</span
+          >
+        </td>
+      {/if}
+      {#if entityState.anySupportBrand && enc.curSettings.breakdown.percentBrand}
+        <td class="px-1 text-center">
+          {customRound((entity.damageStats.debuffedBySupport / entityState.damageDealtWithoutSpecialOrHa) * 100)}<span
+            class="text-xxs text-gray-300">%</span
+          >
+        </td>
+      {/if}
+      {#if entityState.anySupportIdentity && enc.curSettings.breakdown.percentIdentityBySup}
+        <td class="px-1 text-center">
+          {customRound((entity.damageStats.buffedByIdentity / entityState.damageDealtWithoutSpecialOrHa) * 100)}<span
+            class="text-xxs text-gray-300">%</span
+          >
+        </td>
+      {/if}
+      {#if entityState.anySupportHat && enc.curSettings.breakdown.percentHatBySup}
+        <td class="px-1 text-center">
+          {customRound(((entity.damageStats.buffedByHat ?? 0) / entityState.damageDealtWithoutSpecial) * 100)}<span
+            class="text-xxs text-gray-300">%</span
+          >
+        </td>
+      {/if}
+      {#if enc.curSettings.breakdown.avgDamage}
+        <td class="px-1 text-center"> - </td>
+        <td class="px-1 text-center"> - </td>
+      {/if}
+      {#if enc.curSettings.breakdown.maxDamage}
+        <td class="px-1 text-center"> - </td>
+        <td class="px-1 text-center" class:hidden={enc.live}> - </td>
+      {/if}
+      {#if enc.curSettings.breakdown.casts}
+        <td class="px-1 text-center">
+          {entity.skillStats.casts}
+        </td>
+      {/if}
+      {#if enc.curSettings.breakdown.cpm}
+        <td class="px-1 text-center">
+          {customRound(entity.skillStats.casts / (entityState.encounter.duration / 1000 / 60))}
+        </td>
+      {/if}
+      {#if enc.curSettings.breakdown.hits}
+        <td class="px-1 text-center">
+          {entity.skillStats.hits}
+        </td>
+      {/if}
+      {#if enc.curSettings.breakdown.hpm}
+        <td class="px-1 text-center">
+          {#if entity.skillStats.hits === 0}
+            0
+          {:else}
+            {customRound(entity.skillStats.hits / (entityState.encounter.duration / 1000 / 60))}
+          {/if}
+        </td>
+      {/if}
+      {#if entityState.anyCooldownRatio}
+        <td class="px-1 text-center">-</td>
+      {/if}
+      {#if entityState.anyStagger}
+        {@const stagger = abbreviateNumberSplit(entity.damageStats.stagger)}
+        <td class="px-1 text-center"
+          ><QuickTooltip tooltip={entity.damageStats.stagger.toLocaleString()}>
+            {stagger[0]}<span class="text-xxs text-gray-300">{stagger[1]}</span>
+          </QuickTooltip></td
+        >
+      {/if}
+      {#if entityState.hasDrContributions}
+        <td class="px-1 text-center">
+          <QuickTooltip tooltip={entityState.totalDamageReduced.toLocaleString()}>
+            {entityState.totalDamageReducedString[0]}<span class="text-xxs text-gray-300"
+              >{entityState.totalDamageReducedString[1]}</span
+            >
+          </QuickTooltip>
+        </td>
+      {/if}
+      <td
+        class="absolute left-0 -z-10 h-7 px-2 py-1"
+        style="background-color: {settings.app.general.splitLines
+          ? rgbLinearShadeAdjust(entityState.color, -0.2, 0.6)
+          : `rgb(from ${entityState.color} r g b / 0.6)`}; width: 100%"
+      ></td>
+    </tr>
+  {/if}
+  {#each entityState.skills as skill, i (skill.id)}
+    <tr
+      animate:flip={{ duration: 200 }}
+      class="h-7 px-2 py-1 text-xxs {settings.app.general.underlineHovered ? 'hover:underline' : ''}"
+    >
+      <PlayerBreakdownRow {skill} {entityState} width={entityState.skillDamagePercentages[i]!} index={i} />
+    </tr>
+  {/each}
 </tbody>
